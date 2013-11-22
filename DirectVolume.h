@@ -21,7 +21,7 @@
 
 #include "Volume.h"
 
-#define MAX_PARTS 4
+#define MAX_PARTS 16
 
 typedef android::List<char *> PathCollection;
 
@@ -40,6 +40,7 @@ protected:
     int            mOrigDiskMinor;
     int            mOrigPartMinors[MAX_PARTITIONS];
     int            mDiskNumParts;
+    int            mPartsEventCnt;
     unsigned int   mPendingPartMap;
     int            mIsDecrypted;
     int            mFlags;

@@ -63,8 +63,7 @@ int Fat::check(const char *fsPath) {
         int status;
         args[0] = FSCK_MSDOS_PATH;
         args[1] = "-p";
-        args[2] = "-f";
-        args[3] = fsPath;
+        args[2] = fsPath;
 
         rc = android_fork_execvp(ARRAY_SIZE(args), (char **)args, &status,
                 false, true);
@@ -169,15 +168,15 @@ int Fat::doMount(const char *fsPath, const char *mountPoint,
     return rc;
 }
 
-int Fat::format(const char *fsPath, unsigned int numSectors, bool wipe) {
+int Fat::format(const char *fsPath, unsigned int numSectors){
+       return Fat::format(fsPath, numSectors, NULL);
+}
+
+int Fat::format(const char *fsPath, unsigned int numSectors, const char *lable) {
     int fd;
-    const char *args[10];
+    const char *args[13];
     int rc;
     int status;
-
-    if (wipe) {
-        Fat::wipe(fsPath, numSectors);
-    }
 
     args[0] = MKDOSFS_PATH;
     args[1] = "-F";
@@ -192,14 +191,31 @@ int Fat::format(const char *fsPath, unsigned int numSectors, bool wipe) {
         snprintf(tmp, sizeof(tmp), "%u", numSectors);
         const char *size = tmp;
         args[7] = "-s";
-        args[8] = size;
-        args[9] = fsPath;
-        rc = android_fork_execvp(ARRAY_SIZE(args), (char **)args, &status,
-                false, true);
-    } else {
-        args[7] = fsPath;
-        rc = android_fork_execvp(8, (char **)args, &status, false,
-                true);
+		args[8] = size;        
+        if( lable ){
+	           args[9] = "-L" ;
+	           args[10] = lable;
+	           args[11] = fsPath;                              
+	           args[12] = NULL;                
+	           rc = logwrap(13, args, 1);
+        }else{
+	           args[9] = fsPath;       
+	           args[10] = NULL;                        
+	           rc = logwrap(11, args, 1);      
+        }               
+        
+    } else {        
+        if( lable ) {
+	           args[7] = "-L" ;
+	           args[8] = lable;
+	           args[9] = fsPath;
+	           args[10] = NULL;                        
+	           rc = logwrap(11, args, 1);
+         }else{
+             args[7] = fsPath;
+             args[8] = NULL;                 
+             rc = logwrap(9, args, 1);       
+         }
     }
 
     if (rc != 0) {
