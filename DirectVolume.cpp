@@ -42,7 +42,6 @@ DirectVolume::DirectVolume(VolumeManager *vm, const fstab_rec* rec, int flags) :
     mDiskMajor = -1;
     mDiskMinor = -1;
     mDiskNumParts = 0;
-    mPartsEventCnt = 0;
 
     if (strcmp(rec->mount_point, "auto") != 0) {
         ALOGE("Vold managed volumes must have auto mount point; ignoring %s",
@@ -163,8 +162,6 @@ void DirectVolume::handleDiskAdded(const char *devpath, NetlinkEvent *evt) {
         SLOGW("Kernel block uevent missing 'NPARTS'");
         mDiskNumParts = 1;
     }
-    
-     mPartsEventCnt = 0;
 
     int partmask = 0;
     int i;
@@ -194,14 +191,6 @@ void DirectVolume::handlePartitionAdded(const char *devpath, NetlinkEvent *evt) 
     int part_num;
 
     const char *tmp = evt->findParam("PARTN");
-    
-    if(mPartsEventCnt > mDiskNumParts){
-        SLOGW("Partition event is to much, mPartsEventCnt=%d, mDiskNumParts=%d\n", mPartsEventCnt, mDiskNumParts);
-        mPartsEventCnt = mDiskNumParts;
-    }else{
-        mPartsEventCnt++;
-    }
-
 
     if (tmp) {
         part_num = atoi(tmp);
@@ -231,8 +220,7 @@ void DirectVolume::handlePartitionAdded(const char *devpath, NetlinkEvent *evt) 
     } else {
         mPartMinors[part_num -1] = minor;
     }
-   // mPendingPartMap &= ~(1 << part_num);
-   mPendingPartMap &= ~(1 << mPartsEventCnt);
+    mPendingPartMap &= ~(1 << part_num);
 
     if (!mPendingPartMap) {
 #ifdef PARTITION_DEBUG
@@ -268,8 +256,6 @@ void DirectVolume::handleDiskChanged(const char *devpath, NetlinkEvent *evt) {
         SLOGW("Kernel block uevent missing 'NPARTS'");
         mDiskNumParts = 1;
     }
-    
-    mPartsEventCnt = 0;
 
     int partmask = 0;
     int i;
@@ -308,10 +294,6 @@ void DirectVolume::handleDiskRemoved(const char *devpath, NetlinkEvent *evt) {
              getLabel(), getFuseMountpoint(), major, minor);
     mVm->getBroadcaster()->sendBroadcast(ResponseCode::VolumeDiskRemoved,
                                              msg, false);
-                                             
-    /* 2011-4-30 force unmount fs */
-    SLOGD("DirectVolume : handleDiskRemoved : unmountVol");
-    Volume::unmountVol(true,true);
     setState(Volume::State_NoMedia);
 }
 
@@ -339,16 +321,15 @@ void DirectVolume::handlePartitionRemoved(const char *devpath, NetlinkEvent *evt
          * Yikes, our mounted partition is going away!
          */
 
-		if(!strstr(getLabel(),"usb")&&!strstr(getLabel(),"extsd")){
+        bool providesAsec = (getFlags() & VOL_PROVIDES_ASEC) != 0;
+        if (providesAsec && mVm->cleanupAsec(this, true)) {
+            SLOGE("Failed to cleanup ASEC - unmount will probably fail!");
+        }
+
         snprintf(msg, sizeof(msg), "Volume %s %s bad removal (%d:%d)",
                  getLabel(), getFuseMountpoint(), major, minor);
         mVm->getBroadcaster()->sendBroadcast(ResponseCode::VolumeBadRemoval,
                                              msg, false);
-        }
-
-	if (mVm->cleanupAsec(this, true)) {
-            SLOGE("Failed to cleanup ASEC - unmount will probably fail!");
-        }
 
         if (Volume::unmountVol(true, false)) {
             SLOGE("Failed to unmount volume on bad removal (%s)", 
@@ -379,21 +360,20 @@ void DirectVolume::handlePartitionRemoved(const char *devpath, NetlinkEvent *evt
 int DirectVolume::getDeviceNodes(dev_t *devs, int max) {
 
     if (mPartIdx == -1) {
-		// If the disk has no partitions, try the disk itself
-		if (!mDiskNumParts) {
-		    devs[0] = MKDEV(mDiskMajor, mDiskMinor);
-		    return 1;
-		}
+        // If the disk has no partitions, try the disk itself
+        if (!mDiskNumParts) {
+            devs[0] = MKDEV(mDiskMajor, mDiskMinor);
+            return 1;
+        }
 
-		int i;
-		for (i = 0; i < mDiskNumParts; i++) {
-		    if (i == max)
-		        break;
-		    devs[i] = MKDEV(mDiskMajor, mPartMinors[i]);
-		}
-		return mDiskNumParts;
-	 }
-
+        int i;
+        for (i = 0; i < mDiskNumParts; i++) {
+            if (i == max)
+                break;
+            devs[i] = MKDEV(mDiskMajor, mPartMinors[i]);
+        }
+        return mDiskNumParts;
+    }
     devs[0] = MKDEV(mDiskMajor, mPartMinors[mPartIdx -1]);
     return 1;
 }

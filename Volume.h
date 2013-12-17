@@ -45,22 +45,18 @@ public:
     static const char *SEC_ASECDIR_EXT;
     static const char *SEC_ASECDIR_INT;
     static const char *ASECDIR;
-
     static const char *LOOPDIR;
-    static const int MAX_PARTITIONS = 32;
-    static const int MAX_UNMOUNT_PARTITIONS = 256;
+    static const char *BLKID_PATH;
 
 protected:
-    char *mLabel;
+    char* mLabel;
+    char* mUuid;
+    char* mUserLabel;
     VolumeManager *mVm;
     bool mDebug;
     int mPartIdx;
     int mOrigPartIdx;
     bool mRetryMount;
-    
-    char *mMountPart[MAX_PARTITIONS];
-    char *mUnMountPart[MAX_UNMOUNT_PARTITIONS];
-    int mSharelun[MAX_PARTITIONS];
 
     /*
      * The major/minor tuple of the currently mounted filesystem.
@@ -74,10 +70,10 @@ public:
     int mountVol();
     int unmountVol(bool force, bool revert);
     int formatVol(bool wipe);
-    int shareVol(int lun);
-    int unshareVol();
 
-    const char *getLabel() { return mLabel; }
+    const char* getLabel() { return mLabel; }
+    const char* getUuid() { return mUuid; }
+    const char* getUserLabel() { return mUserLabel; }
     int getState() { return mState; }
     int getFlags() { return mFlags; };
 
@@ -95,6 +91,8 @@ public:
     virtual int getVolInfo(struct volume_info *v) = 0;
 
 protected:
+    void setUuid(const char* uuid);
+    void setUserLabel(const char* userLabel);
     void setState(int state);
 
     virtual int getDeviceNodes(dev_t *devs, int max) = 0;
@@ -103,21 +101,13 @@ protected:
     virtual int isDecrypted(void) = 0;
 
     int createDeviceNode(const char *path, int major, int minor);
-    int deleteDeviceNode(const char *path);
 
 private:
     int initializeMbr(const char *deviceNode);
     bool isMountpointMounted(const char *path);
     int mountAsecExternal();
     int doUnmount(const char *path, bool force);
-    void protectFromAutorunStupidity();
-    
-    char* createMountPoint(const char *path, int major, int minor);
-    int deleteMountPoint(char* mountpoint);
-    void saveUnmountPoint(char* mountpoint);
-    void deleteUnMountPoint(int clear);
-
-    int mMountedPartNum; /* the partition numbers that had mounted */
+    int extractMetadata(const char* devicePath);
 };
 
 typedef android::List<Volume *> VolumeCollection;

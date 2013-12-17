@@ -40,16 +40,14 @@
 #include <cutils/fs.h>
 #include <cutils/log.h>
 
+#include <string>
+
 #include "Volume.h"
 #include "VolumeManager.h"
 #include "ResponseCode.h"
 #include "Fat.h"
-#include "Ntfs.h"
-#include "Exfat.h"
 #include "Process.h"
 #include "cryptfs.h"
-
-#define  V_MAX_PARTITIONS              16
 
 extern "C" void dos_partition_dec(void const *pp, struct dos_partition *d);
 extern "C" void dos_partition_enc(void *pp, struct dos_partition *d);
@@ -74,6 +72,7 @@ const char *Volume::SEC_ASECDIR_EXT   = "/mnt/secure/asec";
  * Path to internal storage where *only* root can access ASEC image files
  */
 const char *Volume::SEC_ASECDIR_INT   = "/data/app-asec";
+
 /*
  * Path to where secure containers are mounted
  */
@@ -83,6 +82,8 @@ const char *Volume::ASECDIR           = "/mnt/asec";
  * Path to where OBBs are mounted
  */
 const char *Volume::LOOPDIR           = "/mnt/obb";
+
+const char *Volume::BLKID_PATH = "/system/bin/blkid";
 
 static const char *stateToStr(int state) {
     if (state == Volume::State_Init)
@@ -111,45 +112,21 @@ static const char *stateToStr(int state) {
 
 Volume::Volume(VolumeManager *vm, const fstab_rec* rec, int flags) {
     mVm = vm;
-    mDebug = true;
+    mDebug = false;
     mLabel = strdup(rec->label);
+    mUuid = NULL;
+    mUserLabel = NULL;
     mState = Volume::State_Init;
     mFlags = flags;
     mCurrentlyMountedKdev = -1;
     mPartIdx = rec->partnum;
     mRetryMount = false;
-    
-    for(int i = 0; i < MAX_PARTITIONS; i++){
-   		 mMountPart[i] = NULL;
-       mSharelun[i] = 0;
-    }
-
-   	for(int i = 0; i < MAX_UNMOUNT_PARTITIONS; i++){
-  		 mUnMountPart[i] = NULL;
-   	}
 }
 
 Volume::~Volume() {
     free(mLabel);
-}
-
-void Volume::protectFromAutorunStupidity() {
-    char filename[255];
-
-    snprintf(filename, sizeof(filename), "%s/autorun.inf", getMountpoint());
-    if (!access(filename, F_OK)) {
-        SLOGW("Volume contains an autorun.inf! - removing");
-        /*
-         * Ensure the filename is all lower-case so
-         * the process killer can find the inode.
-         * Probably being paranoid here but meh.
-         */
-        rename(filename, filename);
-        Process::killProcessesWithOpenFiles(filename, 2);
-        if (unlink(filename)) {
-            SLOGE("Failed to remove %s (%s)", filename, strerror(errno));
-        }
-    }
+    free(mUuid);
+    free(mUserLabel);
 }
 
 void Volume::setDebug(bool enable) {
@@ -173,6 +150,46 @@ void Volume::handleVolumeUnshared() {
 int Volume::handleBlockEvent(NetlinkEvent *evt) {
     errno = ENOSYS;
     return -1;
+}
+
+void Volume::setUuid(const char* uuid) {
+    char msg[256];
+
+    if (mUuid) {
+        free(mUuid);
+    }
+
+    if (uuid) {
+        mUuid = strdup(uuid);
+        snprintf(msg, sizeof(msg), "%s %s \"%s\"", getLabel(),
+                getFuseMountpoint(), mUuid);
+    } else {
+        mUuid = NULL;
+        snprintf(msg, sizeof(msg), "%s %s", getLabel(), getFuseMountpoint());
+    }
+
+    mVm->getBroadcaster()->sendBroadcast(ResponseCode::VolumeUuidChange, msg,
+            false);
+}
+
+void Volume::setUserLabel(const char* userLabel) {
+    char msg[256];
+
+    if (mUserLabel) {
+        free(mUserLabel);
+    }
+
+    if (userLabel) {
+        mUserLabel = strdup(userLabel);
+        snprintf(msg, sizeof(msg), "%s %s \"%s\"", getLabel(),
+                getFuseMountpoint(), mUserLabel);
+    } else {
+        mUserLabel = NULL;
+        snprintf(msg, sizeof(msg), "%s %s", getLabel(), getFuseMountpoint());
+    }
+
+    mVm->getBroadcaster()->sendBroadcast(ResponseCode::VolumeUserLabelChange,
+            msg, false);
 }
 
 void Volume::setState(int state) {
@@ -233,7 +250,9 @@ int Volume::formatVol(bool wipe) {
     bool formatEntireDevice = (mPartIdx == -1);
     char devicePath[255];
     dev_t diskNode = getDiskDevice();
-    dev_t partNode = MKDEV(MAJOR(diskNode), (formatEntireDevice ? 1 : mPartIdx));
+    dev_t partNode =
+        MKDEV(MAJOR(diskNode),
+              MINOR(diskNode) + (formatEntireDevice ? 1 : mPartIdx));
 
     setState(Volume::State_Formatting);
 
@@ -287,7 +306,6 @@ bool Volume::isMountpointMounted(const char *path) {
             fclose(fp);
             return true;
         }
-
     }
 
     fclose(fp);
@@ -295,9 +313,8 @@ bool Volume::isMountpointMounted(const char *path) {
 }
 
 int Volume::mountVol() {
-    dev_t deviceNodes[V_MAX_PARTITIONS];
+    dev_t deviceNodes[4];
     int n, i, rc = 0;
-    int mounted = 0;
     char errmsg[255];
 
     int flags = getFlags();
@@ -315,7 +332,6 @@ int Volume::mountVol() {
     /* Don't try to mount the volumes if we have not yet entered the disk password
      * or are in the process of encrypting.
      */
-    SLOGI("Volume::mountVol state : %d", getState());
     if ((getState() == Volume::State_NoMedia) ||
         ((!strcmp(decrypt_state, "1") || encrypt_progress[0]) && providesAsec)) {
         snprintf(errmsg, sizeof(errmsg),
@@ -331,9 +347,6 @@ int Volume::mountVol() {
         if (getState() == Volume::State_Pending) {
             mRetryMount = true;
         }
-        
-        SLOGW("Volume::mountVol: Volume mState is not State_Idle");
-        
         return -1;
     }
 
@@ -344,7 +357,7 @@ int Volume::mountVol() {
         return 0;
     }
 
-    n = getDeviceNodes((dev_t *) &deviceNodes, V_MAX_PARTITIONS);
+    n = getDeviceNodes((dev_t *) &deviceNodes, 4);
     if (!n) {
         SLOGE("Failed to get device nodes (%s)\n", strerror(errno));
         return -1;
@@ -392,27 +405,16 @@ int Volume::mountVol() {
         updateDeviceInfo(nodepath, new_major, new_minor);
 
         /* Get the device nodes again, because they just changed */
-        n = getDeviceNodes((dev_t *) &deviceNodes, V_MAX_PARTITIONS);
+        n = getDeviceNodes((dev_t *) &deviceNodes, 4);
         if (!n) {
             SLOGE("Failed to get device nodes (%s)\n", strerror(errno));
             return -1;
         }
     }
-    
-    SLOGI("Volume::mountVol: mMountpoint %s\n", mMountpoint);
-
-		/* ����??1��??��?��?����?T */
-		if(((mPartIdx == -1) &&(n > 1)) && mMountpoint){
-		       chmod(mMountpoint, 0x777);
-		
-		       /* ��?3y��?��?��?2D��?��??����???1��??��? */
-		       deleteUnMountPoint(1);
-		}
 
     for (i = 0; i < n; i++) {
         char devicePath[255];
 
-				memset(devicePath, 0, 255);
         sprintf(devicePath, "/dev/block/vold/%d:%d", MAJOR(deviceNodes[i]),
                 MINOR(deviceNodes[i]));
 
@@ -421,7 +423,6 @@ int Volume::mountVol() {
         errno = 0;
         setState(Volume::State_Checking);
 
-#if 0
         if (Fat::check(devicePath)) {
             if (errno == ENODATA) {
                 SLOGW("%s does not contain a FAT filesystem\n", devicePath);
@@ -433,7 +434,6 @@ int Volume::mountVol() {
             setState(Volume::State_Idle);
             return -1;
         }
-#endif
 
         errno = 0;
         int gid;
@@ -444,7 +444,7 @@ int Volume::mountVol() {
             continue;
         }
 
-        protectFromAutorunStupidity();
+        extractMetadata(devicePath);
 
         if (providesAsec && mountAsecExternal() != 0) {
             SLOGE("Failed to mount secure area (%s)", strerror(errno));
@@ -460,66 +460,10 @@ int Volume::mountVol() {
         setState(Volume::State_Mounted);
         mCurrentlyMountedKdev = deviceNodes[i];
         return 0;
-#else
-	       /* auto mount and much partition */
-	     if((mPartIdx == -1) && (n > 1)){
-           mMountPart[i] = createMountPoint( mMountpoint, MAJOR(deviceNodes[i]), MINOR(deviceNodes[i]) );
-           if(mMountPart[i] == NULL){
-                   SLOGE("Part is already mount, can not mount again, (%s)\n", strerror(errno));
-                   umount("/mnt/secure/staging");
-                   continue;
-           }
-	
-           if (doMoveMount("/mnt/secure/staging", mMountPart[i], false)) {
-		   				SLOGE("wangjx 13-----------");
-                   SLOGE("Part(%s) failed to move mount (%s)\n", mMountPart[i], strerror(errno));
-                   deleteMountPoint(mMountPart[i]);
-                   mMountPart[i] = NULL;
-                   umount("/mnt/secure/staging");
-                   continue;
-           }
+    }
 
-           SLOGI("mountVlo: mount %s, successful\n", mMountPart[i]);
-
-           mCurrentlyMountedKdev = deviceNodes[i];
-           mounted++;
-	     }else{
-	        if (doMoveMount("/mnt/secure/staging", getMountpoint(), false)) {
-				 	 SLOGE("wangjx------------\n");
-				     SLOGE("Failed to move mount (%s)\n", strerror(errno));
-				     umount("/mnt/secure/staging");
-				     goto failed;
-	     		}
-	
-		      setState(Volume::State_Mounted);
-		      mCurrentlyMountedKdev = deviceNodes[i];
-		      mMountedPartNum = 1;
-		
-		     	return 0;
-	     }
-#endif
-	}
-	
-   mMountedPartNum = n;
-	 if(mounted){
-	     setState(Volume::State_Mounted);
-	 }else{
-	         SLOGE("mount part failed\n");
-	
-	         mMountedPartNum = 0;
-	         setState(Volume::State_Idle);
-	
-	         goto failed;
-	 }
-
-   SLOGI("Volume::mountVol: getState=%d, State_Mounted=%d\n", getState(), Volume::State_Mounted);
-
-   return 0;
-
-failed:
     SLOGE("Volume %s found no suitable devices for mounting :(\n", getLabel());
     setState(Volume::State_Idle);
-    mCurrentlyMountedKdev = -1;
 
     return -1;
 }
@@ -539,6 +483,7 @@ int Volume::mountAsecExternal() {
     }
 
     if (fs_prepare_dir(secure_path, 0770, AID_MEDIA_RW, AID_MEDIA_RW) != 0) {
+        SLOGW("fs_prepare_dir failed: %s", strerror(errno));
         return -1;
     }
 
@@ -559,7 +504,7 @@ int Volume::doUnmount(const char *path, bool force) {
     }
 
     while (retries--) {
-        if (!umount(path) || errno == EINVAL || errno == ENOENT || errno == ENOTCONN) {
+        if (!umount(path) || errno == EINVAL || errno == ENOENT) {
             SLOGI("%s sucessfully unmounted", path);
             return 0;
         }
@@ -636,11 +581,9 @@ int Volume::unmountVol(bool force, bool revert) {
         revertDeviceInfo();
         SLOGI("Encrypted volume %s reverted successfully", getMountpoint());
     }
-		if(((mPartIdx == -1) &&(mMountedPartNum > 1)) && mMountpoint){
-		       deleteUnMountPoint(0);
-		       chmod(mMountpoint, 0x00);
-       }
 
+    setUuid(NULL);
+    setUserLabel(NULL);
     setState(Volume::State_Idle);
     mCurrentlyMountedKdev = -1;
     return 0;
@@ -698,4 +641,57 @@ int Volume::initializeMbr(const char *deviceNode) {
     free(dinfo.part_lst);
 
     return rc;
+}
+
+/*
+ * Use blkid to extract UUID and label from device, since it handles many
+ * obscure edge cases around partition types and formats. Always broadcasts
+ * updated metadata values.
+ */
+int Volume::extractMetadata(const char* devicePath) {
+    int res = 0;
+
+    std::string cmd;
+    cmd = BLKID_PATH;
+    cmd += " -c /dev/null ";
+    cmd += devicePath;
+
+    FILE* fp = popen(cmd.c_str(), "r");
+    if (!fp) {
+        ALOGE("Failed to run %s: %s", cmd.c_str(), strerror(errno));
+        res = -1;
+        goto done;
+    }
+
+    char line[1024];
+    char value[128];
+    if (fgets(line, sizeof(line), fp) != NULL) {
+        ALOGD("blkid identified as %s", line);
+
+        char* start = strstr(line, "UUID=");
+        if (start != NULL && sscanf(start + 5, "\"%127[^\"]\"", value) == 1) {
+            setUuid(value);
+        } else {
+            setUuid(NULL);
+        }
+
+        start = strstr(line, "LABEL=");
+        if (start != NULL && sscanf(start + 6, "\"%127[^\"]\"", value) == 1) {
+            setUserLabel(value);
+        } else {
+            setUserLabel(NULL);
+        }
+    } else {
+        ALOGW("blkid failed to identify %s", devicePath);
+        res = -1;
+    }
+
+    pclose(fp);
+
+done:
+    if (res == -1) {
+        setUuid(NULL);
+        setUserLabel(NULL);
+    }
+    return res;
 }
