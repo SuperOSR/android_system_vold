@@ -51,7 +51,6 @@
 #include "cryptfs.h"
 
 #define MASS_STORAGE_FILE_PATH  "/sys/class/android_usb/android0/f_mass_storage/lun/file"
-#define UMS_DIRTY_RATIO_DEFAULT  40
 
 VolumeManager *VolumeManager::sInstance = NULL;
 
@@ -69,9 +68,8 @@ VolumeManager::VolumeManager() {
     mUmsSharingCount = 0;
     mSavedDirtyRatio = -1;
     // set dirty ratio to 0 when UMS is active
-    mUmsDirtyRatio = UMS_DIRTY_RATIO_DEFAULT;  /* by javen */
+    mUmsDirtyRatio = 0;
     mVolManagerDisabled = 0;
-    mlun =0;
 }
 
 VolumeManager::~VolumeManager() {
@@ -1252,7 +1250,6 @@ int VolumeManager::shareEnabled(const char *label, const char *method, bool *ena
 
 int VolumeManager::shareVolume(const char *label, const char *method) {
     Volume *v = lookupVolume(label);
-    int part = 0;
 
     if (!v) {
         errno = ENOENT;
@@ -1292,22 +1289,36 @@ int VolumeManager::shareVolume(const char *label, const char *method) {
         return -1;
     }
 
-	part=v->shareVol(mlun);
-    mlun += part;
-    SLOGI("shareVolume: mlun = %d", mlun);
+    int fd;
+    char nodepath[255];
+    int written = snprintf(nodepath,
+             sizeof(nodepath), "/dev/block/vold/%d:%d",
+             MAJOR(d), MINOR(d));
+
+    if ((written < 0) || (size_t(written) >= sizeof(nodepath))) {
+        SLOGE("shareVolume failed: couldn't construct nodepath");
+        return -1;
+    }
 
     if ((fd = open(MASS_STORAGE_FILE_PATH, O_WRONLY)) < 0) {
         SLOGE("Unable to open ums lunfile (%s)", strerror(errno));
         return -1;
     }
 
+    if (write(fd, nodepath, strlen(nodepath)) < 0) {
+        SLOGE("Unable to write to ums lunfile (%s)", strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    close(fd);
+    v->handleVolumeShared();
     if (mUmsSharingCount++ == 0) {
         FILE* fp;
         mSavedDirtyRatio = -1; // in case we fail
         if ((fp = fopen("/proc/sys/vm/dirty_ratio", "r+"))) {
             char line[16];
             if (fgets(line, sizeof(line), fp) && sscanf(line, "%d", &mSavedDirtyRatio)) {
-				mUmsDirtyRatio = UMS_DIRTY_RATIO_DEFAULT;
                 fprintf(fp, "%d\n", mUmsDirtyRatio);
             } else {
                 SLOGE("Failed to read dirty_ratio (%s)", strerror(errno));
@@ -1322,8 +1333,6 @@ int VolumeManager::shareVolume(const char *label, const char *method) {
 
 int VolumeManager::unshareVolume(const char *label, const char *method) {
     Volume *v = lookupVolume(label);
-    
-    int part = 0;
 
     if (!v) {
         errno = ENOENT;
@@ -1339,12 +1348,22 @@ int VolumeManager::unshareVolume(const char *label, const char *method) {
         errno = EINVAL;
         return -1;
     }
-    
-    part=v->unshareVol();
-    mlun -= part;
-       
-    SLOGI("unshareVolume: lun = %d", mlun);
 
+    int fd;
+    if ((fd = open(MASS_STORAGE_FILE_PATH, O_WRONLY)) < 0) {
+        SLOGE("Unable to open ums lunfile (%s)", strerror(errno));
+        return -1;
+    }
+
+    char ch = 0;
+    if (write(fd, &ch, 1) < 0) {
+        SLOGE("Unable to write to ums lunfile (%s)", strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    close(fd);
+    v->handleVolumeUnshared();
     if (--mUmsSharingCount == 0 && mSavedDirtyRatio != -1) {
         FILE* fp;
         if ((fp = fopen("/proc/sys/vm/dirty_ratio", "r+"))) {
@@ -1530,35 +1549,49 @@ bool VolumeManager::isMountpointMounted(const char *mp)
 }
 
 int VolumeManager::cleanupAsec(Volume *v, bool force) {
+    int rc = 0;
 
-   
-    /* Only EXTERNAL_STORAGE needs ASEC cleanup. */
-    const char *externalPath = getenv("EXTERNAL_STORAGE") ?: "/mnt/sdcard";
-    if (0 != strcmp(v->getMountpoint(), externalPath))
-        return 0;
+    char asecFileName[255];
 
-	  int rc = unmountAllAsecsInDir(Volume::SEC_ASECDIR_EXT);
+    AsecIdCollection removeAsec;
+    AsecIdCollection removeObb;
 
-    AsecIdCollection toUnmount;
-    // Find the remaining OBB files that are on external storage.
     for (AsecIdCollection::iterator it = mActiveContainers->begin(); it != mActiveContainers->end();
             ++it) {
         ContainerData* cd = *it;
 
         if (cd->type == ASEC) {
-            // nothing
+            if (findAsec(cd->id, asecFileName, sizeof(asecFileName))) {
+                SLOGE("Couldn't find ASEC %s; cleaning up", cd->id);
+                removeAsec.push_back(cd);
+            } else {
+                SLOGD("Found ASEC at path %s", asecFileName);
+                if (!strncmp(asecFileName, Volume::SEC_ASECDIR_EXT,
+                        strlen(Volume::SEC_ASECDIR_EXT))) {
+                    removeAsec.push_back(cd);
+                }
+            }
         } else if (cd->type == OBB) {
             if (v == getVolumeForFile(cd->id)) {
-                toUnmount.push_back(cd);
+                removeObb.push_back(cd);
             }
         } else {
             SLOGE("Unknown container type %d!", cd->type);
         }
     }
 
-    for (AsecIdCollection::iterator it = toUnmount.begin(); it != toUnmount.end(); ++it) {
+    for (AsecIdCollection::iterator it = removeAsec.begin(); it != removeAsec.end(); ++it) {
         ContainerData *cd = *it;
-        SLOGI("Unmounting ASEC %s (dependant on %s)", cd->id, v->getFuseMountpoint());
+        SLOGI("Unmounting ASEC %s (dependent on %s)", cd->id, v->getLabel());
+        if (unmountAsec(cd->id, force)) {
+            SLOGE("Failed to unmount ASEC %s (%s)", cd->id, strerror(errno));
+            rc = -1;
+        }
+    }
+
+    for (AsecIdCollection::iterator it = removeObb.begin(); it != removeObb.end(); ++it) {
+        ContainerData *cd = *it;
+        SLOGI("Unmounting OBB %s (dependent on %s)", cd->id, v->getLabel());
         if (unmountObb(cd->id, force)) {
             SLOGE("Failed to unmount OBB %s (%s)", cd->id, strerror(errno));
             rc = -1;
@@ -1572,7 +1605,7 @@ int VolumeManager::mkdirs(char* path) {
     // Require that path lives under a volume we manage
     const char* emulated_source = getenv("EMULATED_STORAGE_SOURCE");
     const char* root = NULL;
-    if (!strncmp(path, emulated_source, strlen(emulated_source))) {
+    if (emulated_source && !strncmp(path, emulated_source, strlen(emulated_source))) {
         root = emulated_source;
     } else {
         Volume* vol = getVolumeForFile(path);

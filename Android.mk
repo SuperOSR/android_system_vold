@@ -17,18 +17,19 @@ common_src_files := \
 	Xwarp.cpp \
 	VoldUtil.c \
 	fstrim.c \
-	cryptfs.c \
-	Exfat.cpp \
-	Ntfs.cpp
+	cryptfs.c
 
 common_c_includes := \
 	$(KERNEL_HEADERS) \
 	system/extras/ext4_utils \
 	external/openssl/include \
+	external/stlport/stlport \
+	bionic \
 	external/scrypt/lib/crypto
 
 common_shared_libraries := \
 	libsysutils \
+	libstlport \
 	libcutils \
 	liblog \
 	libdiskconfig \
