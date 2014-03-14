@@ -46,6 +46,10 @@ public:
     static const char *SEC_ASECDIR_INT;
     static const char *ASECDIR;
     static const char *LOOPDIR;
+#ifdef TARGET_BOARD_FIBER
+    static const int MAX_PARTITIONS = 32;
+    static const int MAX_UNMOUNT_PARTITIONS = 256;
+#endif
     static const char *BLKID_PATH;
 
 protected:
@@ -57,6 +61,12 @@ protected:
     int mPartIdx;
     int mOrigPartIdx;
     bool mRetryMount;
+    
+#ifdef TARGET_BOARD_FIBER
+    char *mMountPart[MAX_PARTITIONS];
+    char *mUnMountPart[MAX_UNMOUNT_PARTITIONS];
+    int mSharelun[MAX_PARTITIONS];
+#endif
 
     /*
      * The major/minor tuple of the currently mounted filesystem.
@@ -108,6 +118,15 @@ private:
     int mountAsecExternal();
     int doUnmount(const char *path, bool force);
     int extractMetadata(const char* devicePath);
+    
+#ifdef TARGET_BOARD_FIBER
+    char* createMountPoint(const char *path, int major, int minor);
+    int deleteMountPoint(char* mountpoint);
+    void saveUnmountPoint(char* mountpoint);
+    void deleteUnMountPoint(int clear);
+
+    int mMountedPartNum; /* the partition numbers that had mounted */
+#endif
 };
 
 typedef android::List<Volume *> VolumeCollection;

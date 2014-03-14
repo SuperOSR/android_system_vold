@@ -42,6 +42,9 @@ DirectVolume::DirectVolume(VolumeManager *vm, const fstab_rec* rec, int flags) :
     mDiskMajor = -1;
     mDiskMinor = -1;
     mDiskNumParts = 0;
+#ifdef TARGET_BOARD_FIBER
+    mPartsEventCnt = 0;
+#endif
 
     if (strcmp(rec->mount_point, "auto") != 0) {
         ALOGE("Vold managed volumes must have auto mount point; ignoring %s",
@@ -162,6 +165,10 @@ void DirectVolume::handleDiskAdded(const char *devpath, NetlinkEvent *evt) {
         SLOGW("Kernel block uevent missing 'NPARTS'");
         mDiskNumParts = 1;
     }
+    
+#ifdef TARGET_BOARD_FIBER
+     mPartsEventCnt = 0;
+#endif
 
     int partmask = 0;
     int i;
@@ -191,6 +198,15 @@ void DirectVolume::handlePartitionAdded(const char *devpath, NetlinkEvent *evt) 
     int part_num;
 
     const char *tmp = evt->findParam("PARTN");
+    
+#ifdef TARGET_BOARD_FIBER
+    if(mPartsEventCnt > mDiskNumParts){
+        SLOGW("Partition event is to much, mPartsEventCnt=%d, mDiskNumParts=%d\n", mPartsEventCnt, mDiskNumParts);
+        mPartsEventCnt = mDiskNumParts;
+    }else{
+        mPartsEventCnt++;
+    }
+#endif
 
     if (tmp) {
         part_num = atoi(tmp);
@@ -220,8 +236,11 @@ void DirectVolume::handlePartitionAdded(const char *devpath, NetlinkEvent *evt) 
     } else {
         mPartMinors[part_num -1] = minor;
     }
+#ifdef TARGET_BOARD_FIBER
+    mPendingPartMap &= ~(1 << mPartsEventCnt);
+#else
     mPendingPartMap &= ~(1 << part_num);
-
+#endif
     if (!mPendingPartMap) {
 #ifdef PARTITION_DEBUG
         SLOGD("Dv:partAdd: Got all partitions - ready to rock!");
@@ -256,6 +275,10 @@ void DirectVolume::handleDiskChanged(const char *devpath, NetlinkEvent *evt) {
         SLOGW("Kernel block uevent missing 'NPARTS'");
         mDiskNumParts = 1;
     }
+    
+#ifdef TARGET_BOARD_FIBER
+    mPartsEventCnt = 0;
+#endif
 
     int partmask = 0;
     int i;
@@ -294,6 +317,12 @@ void DirectVolume::handleDiskRemoved(const char *devpath, NetlinkEvent *evt) {
              getLabel(), getFuseMountpoint(), major, minor);
     mVm->getBroadcaster()->sendBroadcast(ResponseCode::VolumeDiskRemoved,
                                              msg, false);
+                                             
+#ifdef TARGET_BOARD_FIBER
+    /* 2011-4-30 force unmount fs */
+    SLOGD("DirectVolume : handleDiskRemoved : unmountVol");
+    Volume::unmountVol(true,true);
+#endif
     setState(Volume::State_NoMedia);
 }
 
@@ -326,10 +355,16 @@ void DirectVolume::handlePartitionRemoved(const char *devpath, NetlinkEvent *evt
             SLOGE("Failed to cleanup ASEC - unmount will probably fail!");
         }
 
+#ifdef TARGET_BOARD_FIBER
+		if(!strstr(getLabel(),"usb")&&!strstr(getLabel(),"extsd")){
+#endif
         snprintf(msg, sizeof(msg), "Volume %s %s bad removal (%d:%d)",
                  getLabel(), getFuseMountpoint(), major, minor);
         mVm->getBroadcaster()->sendBroadcast(ResponseCode::VolumeBadRemoval,
                                              msg, false);
+#ifdef TARGET_BOARD_FIBER
+		}
+#endif
 
         if (Volume::unmountVol(true, false)) {
             SLOGE("Failed to unmount volume on bad removal (%s)", 

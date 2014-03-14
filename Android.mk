@@ -19,6 +19,13 @@ common_src_files := \
 	fstrim.c \
 	cryptfs.c
 
+ifeq ($(TARGET_BOARD_PLATFORM), fiber)
+    LOCAL_CFLAGS += -DTARGET_BOARD_FIBER
+    common_src_files += \
+    	Exfat.cpp \
+	    Ntfs.cpp
+endif
+
 common_c_includes := \
 	$(KERNEL_HEADERS) \
 	system/extras/ext4_utils \

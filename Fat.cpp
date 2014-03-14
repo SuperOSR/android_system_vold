@@ -59,12 +59,20 @@ int Fat::check(const char *fsPath) {
     int pass = 1;
     int rc = 0;
     do {
+#ifdef TARGET_BOARD_FIBER
+        const char *args[3];
+#else
         const char *args[4];
+#endif
         int status;
         args[0] = FSCK_MSDOS_PATH;
         args[1] = "-p";
+#ifdef TARGET_BOARD_FIBER
+        args[2] = fsPath;
+#else
         args[2] = "-f";
         args[3] = fsPath;
+#endif
 
         rc = android_fork_execvp(ARRAY_SIZE(args), (char **)args, &status,
                 false, true);
@@ -170,8 +178,17 @@ int Fat::doMount(const char *fsPath, const char *mountPoint,
 }
 
 int Fat::format(const char *fsPath, unsigned int numSectors, bool wipe) {
+	return Fat::format(fsPath, numSectors, wipe, NULL);
+}
+
+int Fat::format(const char *fsPath, unsigned int numSectors, bool wipe, const char *lable) {
     int fd;
+    int nArgs = 0;
+#ifdef TARGET_BOARD_FIBER
+    const char *args[12];
+#else
     const char *args[10];
+#endif
     int rc;
     int status;
 
@@ -186,21 +203,22 @@ int Fat::format(const char *fsPath, unsigned int numSectors, bool wipe) {
     args[4] = "android";
     args[5] = "-c";
     args[6] = "8";
+    nArgs = 6;
 
     if (numSectors) {
         char tmp[32];
         snprintf(tmp, sizeof(tmp), "%u", numSectors);
         const char *size = tmp;
-        args[7] = "-s";
-        args[8] = size;
-        args[9] = fsPath;
-        rc = android_fork_execvp(ARRAY_SIZE(args), (char **)args, &status,
-                false, true);
-    } else {
-        args[7] = fsPath;
-        rc = android_fork_execvp(8, (char **)args, &status, false,
-                true);
+        args[++nArgs] = "-s";
+        args[++nArgs] = size;
     }
+    if( lable ) {
+        args[++nArgs] = "-L" ;
+        args[++nArgs] = lable;
+    }
+    args[++nArgs] = fsPath;
+    rc = android_fork_execvp(ARRAY_SIZE(args), (char **)args, &status, false,
+            true);
 
     if (rc != 0) {
         SLOGE("Filesystem format failed due to logwrap error");

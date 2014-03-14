@@ -21,7 +21,11 @@
 
 #include "Volume.h"
 
+#ifdef TARGET_BOARD_FIBER
+#define MAX_PARTS 16
+#else
 #define MAX_PARTS 4
+#endif
 
 typedef android::List<char *> PathCollection;
 
@@ -40,6 +44,9 @@ protected:
     int            mOrigDiskMinor;
     int            mOrigPartMinors[MAX_PARTITIONS];
     int            mDiskNumParts;
+#ifdef TARGET_BOARD_FIBER
+    int            mPartsEventCnt;
+#endif
     unsigned int   mPendingPartMap;
     int            mIsDecrypted;
 
